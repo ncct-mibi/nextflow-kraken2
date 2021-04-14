@@ -3,8 +3,8 @@
 /*
 NXF ver 19.08+ needed because of the use of tuple instead of set
 */
-if( !nextflow.version.matches('>=19.08') ) {
-    println "This workflow requires Nextflow version 19.08 or greater and you are running version $nextflow.version"
+if( !nextflow.version.matches('>=20.04') ) {
+    println "This workflow requires Nextflow version 20.04 or greater and you are running version $nextflow.version"
     exit 1
 }
 
@@ -19,16 +19,20 @@ ANSI_RESET = "\033[0m"
  * pipeline input parameters 
  */
 params.readsdir = "fastq"
-params.outdir = "${params.readsdir}/results-kraken2" // output is where the reads are because it is easier to integrate with shiny later
+params.outdir = "${workflow.launchDir}/results-kraken2" // output is where the reads are because it is easier to integrate with shiny later
 params.fqpattern = "*_R{1,2}.fastq.gz"
 params.readlen = 150
 params.ontreads = false
-params.kraken_db = "ftp://ftp.ccb.jhu.edu/pub/data/kraken2_dbs/minikraken_8GB_202003.tgz"
+params.kraken_db = false
+//params.kraken_db = "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_8gb_20200919.tar.gz"
+//params.kraken_store = "$HOME/db/kraken" // here kraken db will be collected
+// todo: stage dynamically, using the file name --> under $Home/db/kraken/filename
 params.kaiju_db = false
 params.weakmem = false
 params.taxlevel = "S" //level to estimate abundance at [options: D,P,C,O,F,G,S] (default: S)
 params.skip_krona = false
 params.help = ""
+
 
 /* 
  * handling of parameters 
@@ -94,10 +98,11 @@ log.info """
          --ontreads     : logical, set to true in case of Nanopore reads, default is false. This parameter has influence on fastp -q and bracken -r
          --readlen      : read length used for bracken, default is 150 (250 if ontreads is true). A kmer distribution file for this length has to be present in your database, see bracken help.
          --outdir       : where results will be saved, default is "results-kraken2"
-         --kraken_db    : absolute path or ftp:// of kraken2 database, default is ${params.kraken_db}
+         --kraken_db    : either 'false' (default, do not execute kraken2), or a path to a kraken2 database folder. See https://benlangmead.github.io/aws-indexes/k2 for available ready to use indexes
          --kaiju_db     : either 'false' (default, do not execute kaiju), or one of 'refseq', 'progenomes', 'viruses', 'nr' ...
          --weakmem      : logical, set to true to avoid loading the kraken2 database in RAM (on weak machines)
          --taxlevel     : taxonomical level to estimate bracken abundance at [options: D,P,C,O,F,G,S] (default: S)
+         --skip_krona   : skip making krona plots
         ===========================================
          """
          .stripIndent()
@@ -128,9 +133,6 @@ process SoftwareVersions {
     """
 }
 
-/* 
- * channels for kraken2 with reads (single- or pair-end) and database
- */
 
 Channel
     .fromFilePairs( reads, checkIfExists: true, size: -1 ) // default is 2, so set to -1 to allow any number of files
@@ -175,37 +177,21 @@ fastp_ch
     .into { fastp1; fastp2 }
 
 
-if(params.kraken_db){
-    Channel
-        .of( "${params.kraken_db}" )
-        .set { kraken_db }
-} else {
-        kraken_db = Channel.empty()
-}
-
-// setup kraken2 database, use url to tar.gz db
-// input with ftp:// path downloads and stages the file
-// input with absolute path stages the file downloaded previously
-process KrakenDBPrep {
-input:
-    path kraken_file from kraken_db 
-
-output:
-    path "**", type: 'dir' into kraken2_db_ch // so simple to put a directory in a channel
-
-script:
-"""
-tar -xf $kraken_file
-"""
-}
-
-
-/* 
+/*
  run kraken2 AND bracken 
  Kraken-Style Bracken Report --> to use in pavian
  Bracken output file --> just a table, to be formatted and saved as html DataTable using R
  kraken2 counts file, this is the kraken2.output --> to use in krona
  */
+//fastp1.println()
+
+if(params.kraken_db){
+    Channel
+        .of("${params.kraken_db}")
+        .set { kraken_db_ch }
+} else {
+        kraken_db_ch = Channel.empty()
+}
 
 process Kraken2 {
     tag "kraken2 on $sample_id"
@@ -213,7 +199,8 @@ process Kraken2 {
     publishDir "${params.outdir}/samples", mode: 'copy', pattern: '*.{report,tsv}'
     
     input:
-        path db from kraken2_db_ch.first() //this db is not in the docker image
+        //path db from kraken2_db_ch.flatten().last() 
+        path db from kraken_db_ch.first() //trick to make it a value channel
         tuple sample_id, file(x) from fastp1
     
     output:
